@@ -8,15 +8,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
 
-/**
- * @title IDtnResolver
- * @dev Interface for a generic asynchronous oracle.
- * The BetMarket will call `requestResolve` and the oracle will call back `onPoolResolve`.
- */
-interface IDtnResolver {
-    function requestResolve(string calldata poolInfo, address callbackTarget) external;
-    function onPoolResolve(uint256 poolId, uint8 outcome) external;
-}
+import "./IBetResolver.sol";
 
 /**
  * @title BetMarket
@@ -30,6 +22,7 @@ contract BetMarket {
     using SafeERC20 for IERC20;
 
     uint256 private constant DECIMALS_NORMALIZER = 1e6; // For 6-decimal tokens like USDC
+    uint256 private constant PROMPT_SIZE_LIMIT = 2048;
 
     // --- Enums and Structs ---
 
@@ -42,9 +35,9 @@ contract BetMarket {
 
     struct Pool {
         uint256 id;
-        string title;
         address creator;
         uint256 closingTime;
+        uint256 resolutionTime;
         SD59x18 b;
         SD59x18 nYes;
         SD59x18 nNo;
@@ -52,12 +45,14 @@ contract BetMarket {
         uint256 totalSupplyNo;
         uint256 collateral;
         Resolution resolution;
+        string title;
+        string resolutionPrompt;
     }
 
     // --- State Variables ---
 
     IERC20 public immutable collateralToken;
-    IDtnResolver public immutable dtnResolver;
+    IBetResolver public immutable dtnResolver;
     address public immutable reserveAddress;
 
     uint256 public constant TOTAL_FEE_BPS = 20;
@@ -83,16 +78,22 @@ contract BetMarket {
 
     constructor(address _collateralToken, address _dtnResolver, address _reserveAddress) {
         collateralToken = IERC20(_collateralToken);
-        dtnResolver = IDtnResolver(_dtnResolver);
+        dtnResolver = IBetResolver(_dtnResolver);
         reserveAddress = _reserveAddress;
     }
 
     // --- Public Functions ---
 
-    function createBet(string memory _title, uint256 _initialLiquidity, uint256 _closingTime, uint256 _b) external {
+    function createBet(
+        string memory _title,
+        string memory _resolutionPrompt,
+        uint256 _initialLiquidity,
+        uint256 _closingTime,
+        uint256 _resolutionTime) external {
         require(_initialLiquidity > 0, "Initial liquidity must be > 0");
         require(_closingTime > block.timestamp, "Closing time must be in the future");
-        require(_b > 0, "Liquidity parameter b must be > 0");
+        require(_resolutionTime >= _closingTime, "Resolution must be after closing");
+        require(bytes(_resolutionPrompt).length <= PROMPT_SIZE_LIMIT, "Resolution prompt too long");
 
         poolCounter++;
         uint256 poolId = poolCounter;
@@ -104,9 +105,11 @@ contract BetMarket {
         pools[poolId] = Pool({
             id: poolId,
             title: _title,
+            resolutionPrompt: _resolutionPrompt,
             creator: msg.sender,
             closingTime: _closingTime,
-            b: sd(int256(_b)),
+            resolutionTime: _resolutionTime,
+            b: sd(int256(_initialLiquidity)),
             // FIX: Normalize the 6-decimal token amount before converting to 18-decimal fixed point
             nYes: sd(int256(creatorYesTokens / DECIMALS_NORMALIZER)),
             nNo: sd(int256(creatorNoTokens / DECIMALS_NORMALIZER)),
@@ -141,25 +144,24 @@ contract BetMarket {
         _sell(poolId, amount, false, referrer);
     }
 
-    function resolve(uint256 poolId) external {
+    function resolve(uint256 poolId) external payable {
         Pool storage pool = pools[poolId];
         require(pool.id != 0, "Pool does not exist");
-        require(block.timestamp > pool.closingTime, "Pool has not closed yet");
+        require(block.timestamp > pool.resolutionTime, "Not yet resolution time");
         require(pool.resolution == Resolution.UNRESOLVED, "Pool already resolved");
         
-        string memory poolInfo = string(abi.encodePacked("Resolve BetMarket Pool ID: ", poolId.toString(), ", Title: ", pool.title));
-        dtnResolver.requestResolve(poolInfo, address(this));
+        dtnResolver.resolve{value: msg.value}(poolId, pool.resolutionPrompt, this.onPoolResolve.selector);
         emit PoolResolving(poolId);
     }
 
-    function onPoolResolve(uint256 poolId, uint8 outcome) external {
+    function onPoolResolve(uint256 poolId, IBetResolver.Outcome outcome) external {
         require(msg.sender == address(dtnResolver), "Caller is not the oracle");
         Pool storage pool = pools[poolId];
         require(pool.id != 0, "Pool does not exist");
         require(pool.resolution == Resolution.UNRESOLVED, "Pool already resolved");
 
-        if (outcome == 1) pool.resolution = Resolution.YES;
-        else if (outcome == 2) pool.resolution = Resolution.NO;
+        if (outcome == IBetResolver.Outcome.True) pool.resolution = Resolution.YES;
+        else if (outcome == IBetResolver.Outcome.False) pool.resolution = Resolution.NO;
         else pool.resolution = Resolution.INCONCLUSIVE;
         
         emit PoolResolved(poolId, pool.resolution);

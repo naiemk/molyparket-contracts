@@ -21,13 +21,14 @@ describe("BetResolver", function () {
 
         // Deploy BetResolver
         const BetResolver = await ethers.getContractFactory("BetResolver");
-        betResolver = await BetResolver.deploy();
+        betResolver = await BetResolver.deploy(deployer.address);
 
         // Configure BetResolver (use deployer as betMarket for testing)
         await betResolver.configure(
             deployer.address,
             await mockDtnAi.getAddress(),
             "You are a prediction market oracle. Respond with exactly 'true', 'false', or 'inconclusive'.",
+            "Respond with exactly 'true', 'false', or 'inconclusive'.",
             "model.system.openai-gpt-o3-simpletext",
             "node.tester.node1"
         );
@@ -47,7 +48,7 @@ describe("BetResolver", function () {
         it("Should configure correctly", async function () {
             expect(await betResolver.betMarket()).to.equal(deployer.address);
             expect(await betResolver.ai()).to.equal(await mockDtnAi.getAddress());
-            expect(await betResolver.systemPrompt()).to.equal("You are a prediction market oracle. Respond with exactly 'true', 'false', or 'inconclusive'.");
+            expect(await betResolver.systemPrompt1()).to.equal("You are a prediction market oracle. Respond with exactly 'true', 'false', or 'inconclusive'.");
             expect(await betResolver.modelName()).to.equal("model.system.openai-gpt-o3-simpletext");
             expect(await betResolver.nodeName()).to.equal("node.tester.node1");
         });

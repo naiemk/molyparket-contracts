@@ -21,11 +21,14 @@ describe("BetMarket Integration with BetResolver", function () {
 
         // Deploy BetResolver
         const BetResolver = await ethers.getContractFactory("BetResolver");
-        betResolver = await BetResolver.deploy();
+        betResolver = await BetResolver.deploy(deployer.address);
 
         // Deploy BetMarket
         const BetMarket = await ethers.getContractFactory("BetMarket");
-        betMarket = await BetMarket.deploy(
+        betMarket = await BetMarket.deploy(deployer.address);
+
+        // Configure BetMarket
+        await betMarket.configure(
             await collateralToken.getAddress(),
             await betResolver.getAddress(),
             reserve.address
@@ -36,6 +39,7 @@ describe("BetMarket Integration with BetResolver", function () {
             await betMarket.getAddress(),
             await mockDtnAi.getAddress(),
             "You are a prediction market oracle. Respond with exactly 'true', 'false', or 'inconclusive'.",
+            "Respond with exactly 'true', 'false', or 'inconclusive'.",
             "model.system.openai-gpt-o3-simpletext",
             "node.tester.node1"
         );
@@ -76,7 +80,10 @@ describe("BetMarket Integration with BetResolver", function () {
                 "Will the price of Ethereum (ETH) be above $5000 USD on December 31, 2024 at 23:59:59 UTC?",
                 initialLiquidity,
                 currentTime + closingTime,
-                currentTime + resolutionTime
+                currentTime + resolutionTime,
+                "", // discussion URL
+                "", // tags
+                "" // logo URL
             );
             poolId = 1;
         });
@@ -176,7 +183,10 @@ describe("BetMarket Integration with BetResolver", function () {
                 "Will the price of Bitcoin (BTC) fall below $20,000 USD at any point during 2024?",
                 initialLiquidity,
                 currentTime + closingTime,
-                currentTime + resolutionTime
+                currentTime + resolutionTime,
+                "", // discussion URL
+                "", // tags
+                "" // logo URL
             );
             poolId = 1;
         });
@@ -245,7 +255,10 @@ describe("BetMarket Integration with BetResolver", function () {
                 "Will there be an earthquake of magnitude 7.0 or greater in California during 2024?",
                 initialLiquidity,
                 currentTime + closingTime,
-                currentTime + resolutionTime
+                currentTime + resolutionTime,
+                "", // discussion URL
+                "", // tags
+                "" // logo URL
             );
             poolId = 1;
         });
@@ -316,7 +329,10 @@ describe("BetMarket Integration with BetResolver", function () {
                 "This is a test bet to verify error handling scenarios.",
                 initialLiquidity,
                 currentTime + closingTime,
-                currentTime + resolutionTime
+                currentTime + resolutionTime,
+                "", // discussion URL
+                "", // tags
+                "" // logo URL
             );
             poolId = 1;
         });
@@ -406,7 +422,10 @@ describe("BetMarket Integration with BetResolver", function () {
                 "This is a test bet to verify fee collection and distribution.",
                 initialLiquidity,
                 currentTime + closingTime,
-                currentTime + resolutionTime
+                currentTime + resolutionTime,
+                "", // discussion URL
+                "", // tags
+                "" // logo URL
             );
             poolId = 1;
         });

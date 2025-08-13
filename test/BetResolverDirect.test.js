@@ -21,13 +21,14 @@ describe("BetResolver Direct Tests", function () {
 
         // Deploy BetResolver
         const BetResolver = await ethers.getContractFactory("BetResolver");
-        betResolver = await BetResolver.deploy();
+        betResolver = await BetResolver.deploy(deployer.address);
 
         // Configure BetResolver
         await betResolver.configure(
             deployer.address, // Use deployer as betMarket for testing
             await mockDtnAi.getAddress(),
             "You are a prediction market oracle. Respond with exactly 'true', 'false', or 'inconclusive'.",
+            "Respond with exactly 'true', 'false', or 'inconclusive'.",
             "model.system.openai-gpt-o3-simpletext",
             "node.tester.node1"
         );

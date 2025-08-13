@@ -1,4 +1,5 @@
 require("@nomicfoundation/hardhat-toolbox");
+require("dotenv").config();
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
@@ -16,5 +17,23 @@ module.exports = {
     hardhat: {
       allowUnlimitedContractSize: true,
     },
+    sepolia: {
+      chainId: 11155111,
+      url: process.env.SEPOLIA_URL,
+      accounts: [process.env.PRIVATE_KEY],
+    },
+  },
+  ignition: {
+    requiredConfirmations: 1,
+    blockPollingInterval: 300,
+    strategyConfig: {
+      create2: {
+        // To learn more about salts, see the CreateX documentation
+        salt: "0x0000000000000000000000000000000000001000000000000000000000000002"
+      },
+    },
+  },
+  etherscan: {
+    apiKey: process.env.ETHERSCAN_API_KEY,
   },
 };

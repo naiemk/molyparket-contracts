@@ -7,6 +7,7 @@ import {SD59x18, sd, exp, ln} from "@prb/math/src/SD59x18.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
 import "./IBetResolver.sol";
 
@@ -17,7 +18,7 @@ import "./IBetResolver.sol";
  * @dev This contract uses prb-math v4 (SD59x18) for fixed-point arithmetic to ensure numerical stability.
  * It manages multiple prediction pools, each with its own liquidity and state.
  */
-contract BetMarket {
+contract BetMarket is Ownable {
     using Strings for uint256;
     using SafeERC20 for IERC20;
 
@@ -47,13 +48,16 @@ contract BetMarket {
         Resolution resolution;
         string title;
         string resolutionPrompt;
+        string discussionUrl;
+        string tags;
+        string logoUrl;
     }
 
     // --- State Variables ---
 
-    IERC20 public immutable collateralToken;
-    IBetResolver public immutable dtnResolver;
-    address public immutable reserveAddress;
+    IERC20 public collateralToken;
+    IBetResolver public dtnResolver;
+    address public reserveAddress;
 
     uint256 public constant TOTAL_FEE_BPS = 20;
     uint256 public constant REFERRER_FEE_BPS = 10;
@@ -64,6 +68,7 @@ contract BetMarket {
     mapping(uint256 => mapping(address => uint256)) public yesBalances;
     mapping(uint256 => mapping(address => uint256)) public noBalances;
     mapping(uint256 => mapping(address => bool)) public isBlockedFromTrading;
+    uint256[] public betIds;
 
     // --- Events ---
 
@@ -76,7 +81,10 @@ contract BetMarket {
 
     // --- Constructor ---
 
-    constructor(address _collateralToken, address _dtnResolver, address _reserveAddress) {
+    constructor(address owner) Ownable(owner) {
+    }
+
+    function configure(address _collateralToken, address _dtnResolver, address _reserveAddress) external onlyOwner {
         collateralToken = IERC20(_collateralToken);
         dtnResolver = IBetResolver(_dtnResolver);
         reserveAddress = _reserveAddress;
@@ -84,12 +92,37 @@ contract BetMarket {
 
     // --- Public Functions ---
 
+    function betIdsLength() external view returns (uint256) {
+        return betIds.length;
+    }
+
+    function getBetSummaries(uint256[] memory _betIds) external view returns (
+        uint256[] memory _yesSupply, uint256[] memory _noSupply, uint256[] memory _collaterals, uint8[] memory _resolutions) {
+        uint256 length = _betIds.length;
+        _yesSupply = new uint256[](length);
+        _noSupply = new uint256[](length);
+        _collaterals = new uint256[](length);
+        _resolutions = new uint8[](length);
+
+        for (uint256 i = 0; i < length; i++) {  
+            uint256 betId = betIds[i];
+            Pool storage pool = pools[betId];
+            _yesSupply[i] = pool.totalSupplyYes;
+            _noSupply[i] = pool.totalSupplyNo;
+            _collaterals[i] = pool.collateral;
+            _resolutions[i] = uint8(pool.resolution);
+        }
+    }
+
     function createBet(
         string memory _title,
         string memory _resolutionPrompt,
         uint256 _initialLiquidity,
         uint256 _closingTime,
-        uint256 _resolutionTime) external {
+        uint256 _resolutionTime,
+        string memory _discussionUrl,
+        string memory _tags,
+        string memory _logoUrl) external {
         require(_initialLiquidity > 0, "Initial liquidity must be > 0");
         require(_closingTime > block.timestamp, "Closing time must be in the future");
         require(_resolutionTime >= _closingTime, "Resolution must be after closing");
@@ -109,19 +142,24 @@ contract BetMarket {
             creator: msg.sender,
             closingTime: _closingTime,
             resolutionTime: _resolutionTime,
-            b: sd(int256(_initialLiquidity)),
-            // FIX: Normalize the 6-decimal token amount before converting to 18-decimal fixed point
-            nYes: sd(int256(creatorYesTokens / DECIMALS_NORMALIZER)),
-            nNo: sd(int256(creatorNoTokens / DECIMALS_NORMALIZER)),
+            b: sd(int256(1e7)), // Use b = 0.01 for proper LMSR behavior (1e7 in 18-decimal fixed point)
+            // FIX: Convert 6-decimal token amounts to 18-decimal fixed point
+            nYes: sd(int256(creatorYesTokens)),
+            nNo: sd(int256(creatorNoTokens)),
             totalSupplyYes: creatorYesTokens,
             totalSupplyNo: creatorNoTokens,
             collateral: _initialLiquidity,
-            resolution: Resolution.UNRESOLVED
+            resolution: Resolution.UNRESOLVED,
+            discussionUrl: _discussionUrl,
+            tags: _tags,
+            logoUrl: _logoUrl
         });
+
 
         isBlockedFromTrading[poolId][msg.sender] = true;
         yesBalances[poolId][msg.sender] = creatorYesTokens;
         noBalances[poolId][msg.sender] = creatorNoTokens;
+        betIds.push(poolId);
 
         collateralToken.safeTransferFrom(msg.sender, address(this), _initialLiquidity);
 
@@ -199,8 +237,8 @@ contract BetMarket {
         uint256 totalCost = netCost + fee;
 
         pool.collateral += netCost;
-        // FIX: Normalize the 6-decimal token amount before converting to 18-decimal fixed point
-        SD59x18 amountFixed = sd(int256(amount / DECIMALS_NORMALIZER));
+        // FIX: Convert 6-decimal token amounts to 18-decimal fixed point
+        SD59x18 amountFixed = sd(int256(amount));
         if (isYes) {
             pool.nYes = pool.nYes + amountFixed;
             pool.totalSupplyYes += amount;
@@ -233,8 +271,8 @@ contract BetMarket {
         require(grossRefund > 0, "Refund cannot be zero");
 
         pool.collateral -= grossRefund;
-        // FIX: Normalize the 6-decimal token amount before converting to 18-decimal fixed point
-        SD59x18 amountFixed = sd(int256(amount / DECIMALS_NORMALIZER));
+        // FIX: Convert 6-decimal token amounts to 18-decimal fixed point
+        SD59x18 amountFixed = sd(int256(amount));
         if (isYes) {
             pool.nYes = pool.nYes - amountFixed;
             pool.totalSupplyYes -= amount;
@@ -297,7 +335,7 @@ contract BetMarket {
 
     function _costToBuy(uint256 poolId, uint256 amount, bool isYes) internal view returns (uint256) {
         Pool storage pool = pools[poolId];
-        SD59x18 amountFixed = sd(int256(amount / DECIMALS_NORMALIZER));
+        SD59x18 amountFixed = sd(int256(amount)); // Convert 6-decimal to 18-decimal fixed point
         SD59x18 initialCost = _calcCost(pool.nYes, pool.nNo, pool.b);
         SD59x18 finalCost;
         if (isYes) {
@@ -306,7 +344,7 @@ contract BetMarket {
             finalCost = _calcCost(pool.nYes, pool.nNo + amountFixed, pool.b);
         }
         uint256 netCost = uint256(SD59x18.unwrap(finalCost - initialCost));
-        return netCost * DECIMALS_NORMALIZER;
+        return netCost; // No conversion needed since we're using 6-decimal throughout
     }
 
     function _costToBuyYes(uint256 poolId, uint256 amount) internal view returns (uint256) {
@@ -331,24 +369,24 @@ contract BetMarket {
 
     function revenueFromSellYes(uint256 poolId, uint256 amount) public view returns (uint256) {
         Pool storage pool = pools[poolId];
-        SD59x18 amountFixed = sd(int256(amount / DECIMALS_NORMALIZER));
+        SD59x18 amountFixed = sd(int256(amount)); // Convert 6-decimal to 18-decimal fixed point
         SD59x18 initialCost = _calcCost(pool.nYes, pool.nNo, pool.b);
         SD59x18 finalCost = _calcCost(pool.nYes - amountFixed, pool.nNo, pool.b);
         uint256 grossRevenue = uint256(SD59x18.unwrap(initialCost - finalCost));
         uint256 fee = (grossRevenue * TOTAL_FEE_BPS) / 10000;
         if (grossRevenue <= fee) return 0;
-        return (grossRevenue - fee) * DECIMALS_NORMALIZER;
+        return (grossRevenue - fee); // No conversion needed since we're using 6-decimal throughout
     }
 
     function revenueFromSellNo(uint256 poolId, uint256 amount) public view returns (uint256) {
         Pool storage pool = pools[poolId];
-        SD59x18 amountFixed = sd(int256(amount / DECIMALS_NORMALIZER));
+        SD59x18 amountFixed = sd(int256(amount)); // Convert 6-decimal to 18-decimal fixed point
         SD59x18 initialCost = _calcCost(pool.nYes, pool.nNo, pool.b);
         SD59x18 finalCost = _calcCost(pool.nYes, pool.nNo - amountFixed, pool.b);
         uint256 grossRevenue = uint256(SD59x18.unwrap(initialCost - finalCost));
         uint256 fee = (grossRevenue * TOTAL_FEE_BPS) / 10000;
         if (grossRevenue <= fee) return 0;
-        return (grossRevenue - fee) * DECIMALS_NORMALIZER;
+        return (grossRevenue - fee); // No conversion needed since we're using 6-decimal throughout
     }
 
     function _calcCost(SD59x18 _nYes, SD59x18 _nNo, SD59x18 _b) internal pure returns (SD59x18) {

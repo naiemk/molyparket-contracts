@@ -30,57 +30,28 @@ async function main() {
   try {
     console.log("\n🚀 Starting deployment using Ignition modules...");
     
-    // Deploy using Ignition FullDeployment module
-    const { execSync } = require('child_process');
+    // Import the FullDeployment module
+    const deployModule = require("../ignition/modules/FullDeployment.js");
     
-    // Set environment variables for Ignition parameters
-    const env = {
-      ...process.env,
-      BET_RESOLVER_SALT: config.betResolverSalt,
-      BET_MARKET_SALT: config.betMarketSalt,
-      COLLATERAL_TOKEN: config.collateralToken,
-      DTN_AI: config.dtnAi,
-      RESERVE_ADDRESS: config.reserveAddress,
-      SYSTEM_PROMPT: config.systemPrompt,
-      MODEL_NAME: config.modelName,
-      NODE_NAME: config.nodeName,
-      FEE_PER_BYTE_REQ: config.feePerByteReq.toString(),
-      FEE_PER_BYTE_RES: config.feePerByteRes.toString(),
-      TOTAL_FEE_PER_RES: config.totalFeePerRes.toString(),
-      RESOLUTION_GAS_LIMIT: config.resolutionGasLimit.toString()
-    };
+    // Deploy using Ignition with CREATE2 strategy and UI display
+    const result = await hre.ignition.deploy(
+      deployModule, 
+      { 
+        strategy: 'create2', 
+        displayUi: true 
+      }
+    );
     
-    const command = `npx hardhat ignition deploy ignition/modules/FullDeployment.js --network ${hre.network.name}`;
-    console.log("Executing:", command);
-    console.log("With environment variables for parameters");
-    
-    const output = execSync(command, { 
-      encoding: 'utf8',
-      env: env
-    });
-    console.log("Ignition output:", output);
-    
-    // Parse the output to extract addresses
-    const betResolverMatch = output.match(/FullDeploymentModule#BetResolver - (0x[a-fA-F0-9]{40})/);
-    const betMarketMatch = output.match(/FullDeploymentModule#BetMarket - (0x[a-fA-F0-9]{40})/);
-    
-    if (!betResolverMatch || !betMarketMatch) {
-      throw new Error("Could not extract contract addresses from Ignition output");
-    }
-    
-    const betResolverAddress = betResolverMatch[1];
-    const betMarketAddress = betMarketMatch[1];
-
     console.log("\n✅ Deployment completed successfully!");
     console.log("\nDeployed contracts:");
-    console.log("- BetResolver:", betResolverAddress);
-    console.log("- BetMarket:", betMarketAddress);
+    console.log("- BetResolver:", result.betResolver);
+    console.log("- BetMarket:", result.betMarket);
 
     // Get contract instances for verification
     const BetResolver = await ethers.getContractFactory("BetResolver");
     const BetMarket = await ethers.getContractFactory("BetMarket");
-    const betResolver = BetResolver.attach(betResolverAddress);
-    const betMarket = BetMarket.attach(betMarketAddress);
+    const betResolver = BetResolver.attach(result.betResolver);
+    const betMarket = BetMarket.attach(result.betMarket);
 
     // Verify configuration
     console.log("\n🔍 Verifying configuration...");
@@ -100,14 +71,14 @@ async function main() {
 
       // Verify cross-references
       console.log("\n🔗 Cross-reference verification:");
-      if (configuredBetMarket === betMarketAddress) {
+      if (configuredBetMarket === result.betMarket) {
         console.log("✅ BetResolver correctly references BetMarket");
       } else {
         console.log("❌ BetResolver references wrong BetMarket address");
       }
 
       const dtnResolver = await betMarket.dtnResolver();
-      if (dtnResolver === betResolverAddress) {
+      if (dtnResolver === result.betResolver) {
         console.log("✅ BetMarket correctly references BetResolver");
       } else {
         console.log("❌ BetMarket references wrong BetResolver address");
@@ -121,8 +92,8 @@ async function main() {
     const deploymentInfo = {
       network: hre.network.name,
       deployer: deployer.address,
-      betResolver: betResolverAddress,
-      betMarket: betMarketAddress,
+      betResolver: result.betResolver,
+      betMarket: result.betMarket,
       betResolverSalt: config.betResolverSalt,
       betMarketSalt: config.betMarketSalt,
       config: {

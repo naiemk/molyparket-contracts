@@ -42,7 +42,8 @@ contract BetResolver is WithDtnAi, Ownable, IBetResolver {
     uint256 public sessionId;
 
     // Inference configuration
-    string public systemPrompt; // wrapper line 0 for each resolve call
+    string public systemPrompt1; // wrapper line 0 for each resolve call
+    string public systemPrompt2; // wrapper  last line for each resolve call
     string public modelName;    // e.g., "model.system.openai-gpt-o3-simpletext"
     string public nodeName;     // REQUIRED: e.g., "node.tester.node1"
 
@@ -58,26 +59,27 @@ contract BetResolver is WithDtnAi, Ownable, IBetResolver {
     event BetResolutionFailed(uint256 indexed betId, bytes32 indexed requestId, string message);
     event BetResolutionCallbackFailed(uint256 indexed betId, bytes32 indexed requestId, bytes data);
     event SessionRestarted(uint256 sessionId, uint256 fundedAmount);
-    event ConfigUpdated(address dtnAi, string systemPrompt, string modelName, string nodeName);
+    event ConfigUpdated(address dtnAi, string systemPrompt1, string systemPrompt2, string modelName, string nodeName);
     event FeesUpdated(uint256 feePerByteReq, uint256 feePerByteRes, uint256 totalFeePerRes, uint256 resolutionGasLimit);
 
-    constructor(
-    ) Ownable(msg.sender) {
+    constructor(address owner) Ownable(owner) {
     }
 
     function configure(
         address _betMarket,
         address _dtnAi,
-        string memory _systemPrompt,
+        string memory _systemPrompt1,
+        string memory _systemPrompt2,
         string memory _modelName,
         string memory _nodeName
     ) external onlyOwner {
         setAi(_dtnAi);
         betMarket = _betMarket;
-        systemPrompt = _systemPrompt;
+        systemPrompt1 = _systemPrompt1;
+        systemPrompt2 = _systemPrompt2;
         modelName = _modelName;
         nodeName = _nodeName;
-        emit ConfigUpdated(_dtnAi, _systemPrompt, _modelName, _nodeName);
+        emit ConfigUpdated(_dtnAi, _systemPrompt1, _systemPrompt2, _modelName, _nodeName);
     }
 
     function setFees(uint256 _feePerByteReq, uint256 _feePerByteRes, uint256 _totalFeePerRes, uint256 _resolutionGasLimit) external onlyOwner {
@@ -123,10 +125,10 @@ contract BetResolver is WithDtnAi, Ownable, IBetResolver {
         require(msg.value >= resolutionGasLimit, "insufficient gas");
 
         // Build prompt lines: [systemPrompt, question]
-        string[3] memory prompt_lines;
-        prompt_lines[0] = systemPrompt;
+        string[] memory prompt_lines = new string[](3);
+        prompt_lines[0] = systemPrompt1;
         prompt_lines[1] = betPrompt;
-        prompt_lines[2] = systemPrompt;
+        prompt_lines[2] = systemPrompt2;
 
         // ---- ROUTING: custom nodes only ----
         bytes32[] memory nodes = new bytes32[](1);

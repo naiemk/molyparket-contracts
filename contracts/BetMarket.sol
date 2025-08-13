@@ -66,6 +66,7 @@ contract BetMarket is Ownable {
     mapping(address => uint256) public withdrawableFees;
 
     uint256 private poolCounter;
+    uint256 public totalCollateral; // Total collateral across all pools
     mapping(uint256 => Pool) public pools;
     mapping(uint256 => mapping(address => uint256)) public yesBalances;
     mapping(uint256 => mapping(address => uint256)) public noBalances;
@@ -81,6 +82,7 @@ contract BetMarket is Ownable {
     event Withdrawn(uint256 indexed poolId, address indexed user, uint256 amount);
     event FeesWithdrawn(address indexed recipient, uint256 amount);
     event Configured(address collateralToken, uint8 decimals);
+    event DustCollected(address indexed owner, uint256 amount);
 
     // --- Constructor ---
 
@@ -174,6 +176,7 @@ contract BetMarket is Ownable {
         yesBalances[poolId][msg.sender] = creatorYesTokens;
         noBalances[poolId][msg.sender] = creatorNoTokens;
         betIds.push(poolId);
+        totalCollateral += _initialLiquidity;
 
         collateralToken.safeTransferFrom(msg.sender, address(this), _initialLiquidity);
 
@@ -225,6 +228,7 @@ contract BetMarket is Ownable {
 
         yesBalances[poolId][msg.sender] = 0;
         noBalances[poolId][msg.sender] = 0;
+        totalCollateral -= pools[poolId].collateral;
 
         collateralToken.safeTransfer(msg.sender, payout);
         emit Withdrawn(poolId, msg.sender, payout);
@@ -236,6 +240,24 @@ contract BetMarket is Ownable {
         withdrawableFees[msg.sender] = 0;
         collateralToken.safeTransfer(msg.sender, amount);
         emit FeesWithdrawn(msg.sender, amount);
+    }
+
+    /**
+     * @notice Allows the contract owner to collect any excess collateral above the expected total.
+     * @dev This function calculates the total expected collateral across all pools and withdraws
+     * any amount above that to the owner's address.
+     */
+    function collectDust(address to) external onlyOwner {
+        uint256 actualBalance = collateralToken.balanceOf(address(this));
+        uint256 excessAmount = actualBalance > totalCollateral ? 
+            actualBalance - totalCollateral : 0;
+        
+        require(excessAmount > 0, "No dust to collect");
+        
+        // Transfer the excess collateral to the owner
+        collateralToken.safeTransfer(to, excessAmount);
+        
+        emit DustCollected(to, excessAmount);
     }
 
     // --- Internal Functions ---
@@ -251,6 +273,7 @@ contract BetMarket is Ownable {
         uint256 totalCost = netCost + fee;
 
         pool.collateral += netCost;
+        totalCollateral += netCost;
         // Scale the amount to 18 decimals before adding to the fixed-point state
         SD59x18 amountFixed = sd(int256(amount * scalingFactor));
         if (isYes) {
@@ -285,6 +308,7 @@ contract BetMarket is Ownable {
         uint256 netRefund = grossRefund - fee;
         
         pool.collateral -= grossRefund;
+        totalCollateral -= grossRefund;
 
         // Scale the amount to 18 decimals before subtracting from the fixed-point state
         SD59x18 amountFixed = sd(int256(amount * scalingFactor));

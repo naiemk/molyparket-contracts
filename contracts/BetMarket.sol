@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// Updated import for prb-math v4 to include exp and ln
 import {SD59x18, sd, exp, ln} from "@prb/math/src/SD59x18.sol";
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -15,14 +15,14 @@ import "./IBetResolver.sol";
  * @title BetMarket
  * @author Gemini
  * @notice A prediction market contract using the Logarithmic Market Scoring Rule (LMSR).
- * @dev This contract uses prb-math v4 (SD59x18) for fixed-point arithmetic to ensure numerical stability.
+ * @dev This contract uses prb-math v4 (SD59x18) for fixed-point arithmetic.
+ * It dynamically handles collateral token decimals to ensure numerical stability.
  * It manages multiple prediction pools, each with its own liquidity and state.
  */
 contract BetMarket is Ownable {
     using Strings for uint256;
     using SafeERC20 for IERC20;
 
-    uint256 private constant DECIMALS_NORMALIZER = 1e6; // For 6-decimal tokens like USDC
     uint256 private constant PROMPT_SIZE_LIMIT = 2048;
 
     // --- Enums and Structs ---
@@ -39,9 +39,9 @@ contract BetMarket is Ownable {
         address creator;
         uint256 closingTime;
         uint256 resolutionTime;
-        SD59x18 b;
-        SD59x18 nYes;
-        SD59x18 nNo;
+        SD59x18 b; // Liquidity parameter, stored as d18
+        SD59x18 nYes; // Number of YES shares, stored as d18
+        SD59x18 nNo; // Number of NO shares, stored as d18
         uint256 totalSupplyYes;
         uint256 totalSupplyNo;
         uint256 collateral;
@@ -58,6 +58,8 @@ contract BetMarket is Ownable {
     IERC20 public collateralToken;
     IBetResolver public dtnResolver;
     address public reserveAddress;
+    uint8 public collateralDecimals;
+    uint256 public scalingFactor; // = 10**(18 - collateralDecimals)
 
     uint256 public constant TOTAL_FEE_BPS = 20;
     uint256 public constant REFERRER_FEE_BPS = 10;
@@ -78,16 +80,26 @@ contract BetMarket is Ownable {
     event PoolResolved(uint256 indexed poolId, Resolution outcome);
     event Withdrawn(uint256 indexed poolId, address indexed user, uint256 amount);
     event FeesWithdrawn(address indexed recipient, uint256 amount);
+    event Configured(address collateralToken, uint8 decimals);
 
     // --- Constructor ---
 
-    constructor(address owner) Ownable(owner) {
-    }
+    constructor(address owner) Ownable(owner) {}
 
+    /**
+     * @notice Configures the contract's core addresses and parameters.
+     * @dev Fetches and stores the collateral token's decimals to calculate the scaling factor.
+     */
     function configure(address _collateralToken, address _dtnResolver, address _reserveAddress) external onlyOwner {
         collateralToken = IERC20(_collateralToken);
         dtnResolver = IBetResolver(_dtnResolver);
         reserveAddress = _reserveAddress;
+        
+        collateralDecimals = IERC20Metadata(address(collateralToken)).decimals();
+        require(collateralDecimals <= 18, "Token decimals cannot exceed 18");
+        scalingFactor = 10**(18 - collateralDecimals);
+        
+        emit Configured(_collateralToken, collateralDecimals);
     }
 
     // --- Public Functions ---
@@ -104,8 +116,8 @@ contract BetMarket is Ownable {
         _collaterals = new uint256[](length);
         _resolutions = new uint8[](length);
 
-        for (uint256 i = 0; i < length; i++) {  
-            uint256 betId = betIds[i];
+        for (uint256 i = 0; i < length; i++) {
+            uint256 betId = _betIds[i]; // Use the passed-in ID
             Pool storage pool = pools[betId];
             _yesSupply[i] = pool.totalSupplyYes;
             _noSupply[i] = pool.totalSupplyNo;
@@ -127,6 +139,7 @@ contract BetMarket is Ownable {
         require(_closingTime > block.timestamp, "Closing time must be in the future");
         require(_resolutionTime >= _closingTime, "Resolution must be after closing");
         require(bytes(_resolutionPrompt).length <= PROMPT_SIZE_LIMIT, "Resolution prompt too long");
+        require(address(collateralToken) != address(0), "Contract not configured");
 
         poolCounter++;
         uint256 poolId = poolCounter;
@@ -142,10 +155,11 @@ contract BetMarket is Ownable {
             creator: msg.sender,
             closingTime: _closingTime,
             resolutionTime: _resolutionTime,
-            b: sd(int256(1e7)), // Use b = 0.01 for proper LMSR behavior (1e7 in 18-decimal fixed point)
-            // FIX: Convert 6-decimal token amounts to 18-decimal fixed point
-            nYes: sd(int256(creatorYesTokens)),
-            nNo: sd(int256(creatorNoTokens)),
+            // Set b=$100, properly scaled to 18 decimals for the math library
+            b: sd(int256(100 * 1e18)),
+            // Scale initial token amounts to 18 decimals for the math library
+            nYes: sd(int256(creatorYesTokens * scalingFactor)),
+            nNo: sd(int256(creatorNoTokens * scalingFactor)),
             totalSupplyYes: creatorYesTokens,
             totalSupplyNo: creatorNoTokens,
             collateral: _initialLiquidity,
@@ -237,8 +251,8 @@ contract BetMarket is Ownable {
         uint256 totalCost = netCost + fee;
 
         pool.collateral += netCost;
-        // FIX: Convert 6-decimal token amounts to 18-decimal fixed point
-        SD59x18 amountFixed = sd(int256(amount));
+        // Scale the amount to 18 decimals before adding to the fixed-point state
+        SD59x18 amountFixed = sd(int256(amount * scalingFactor));
         if (isYes) {
             pool.nYes = pool.nYes + amountFixed;
             pool.totalSupplyYes += amount;
@@ -262,17 +276,18 @@ contract BetMarket is Ownable {
         if (isYes) require(yesBalances[poolId][msg.sender] >= amount, "Insufficient YES balance");
         else require(noBalances[poolId][msg.sender] >= amount, "Insufficient NO balance");
 
-        uint256 totalRefund = isYes ? revenueFromSellYes(poolId, amount) : revenueFromSellNo(poolId, amount);
-        
-        // The revenue functions already calculate fees, so we need to calculate the gross amount for pool accounting
-        uint256 fee = (totalRefund * TOTAL_FEE_BPS) / (10000 - TOTAL_FEE_BPS);
-        uint256 grossRefund = totalRefund + fee;
-        
+        // The public-facing revenue functions return the net refund, so we use an internal one to get the gross.
+        uint256 grossRefund = _revenueFromSell(poolId, amount, isYes);
         require(grossRefund > 0, "Refund cannot be zero");
 
+        uint256 fee = (grossRefund * TOTAL_FEE_BPS) / 10000;
+        require(grossRefund > fee, "Refund less than fee");
+        uint256 netRefund = grossRefund - fee;
+        
         pool.collateral -= grossRefund;
-        // FIX: Convert 6-decimal token amounts to 18-decimal fixed point
-        SD59x18 amountFixed = sd(int256(amount));
+
+        // Scale the amount to 18 decimals before subtracting from the fixed-point state
+        SD59x18 amountFixed = sd(int256(amount * scalingFactor));
         if (isYes) {
             pool.nYes = pool.nYes - amountFixed;
             pool.totalSupplyYes -= amount;
@@ -284,7 +299,7 @@ contract BetMarket is Ownable {
         }
 
         _distributeFees(fee, referrer);
-        collateralToken.safeTransfer(msg.sender, totalRefund);
+        collateralToken.safeTransfer(msg.sender, netRefund);
         emit Trade(poolId, msg.sender, false, isYes, amount, grossRefund);
     }
 
@@ -308,12 +323,50 @@ contract BetMarket is Ownable {
         require(!isBlockedFromTrading[pool.id][trader], "Address is blocked from trading");
     }
 
+    // --- LMSR Math Functions (Internal) ---
+
+    function _calcCost(SD59x18 _nYes, SD59x18 _nNo, SD59x18 _b) internal pure returns (SD59x18) {
+        SD59x18 expNy = exp(_nYes / _b);
+        SD59x18 expNn = exp(_nNo / _b);
+        return ln(expNy + expNn) * _b;
+    }
+
+    function _costToBuy(uint256 poolId, uint256 amount, bool isYes) internal view returns (uint256) {
+        Pool storage pool = pools[poolId];
+        // Scale amount from token decimals to 18 decimals for math
+        SD59x18 amountFixed = sd(int256(amount * scalingFactor));
+        SD59x18 initialCost = _calcCost(pool.nYes, pool.nNo, pool.b);
+        SD59x18 finalCost;
+        if (isYes) {
+            finalCost = _calcCost(pool.nYes + amountFixed, pool.nNo, pool.b);
+        } else {
+            finalCost = _calcCost(pool.nYes, pool.nNo + amountFixed, pool.b);
+        }
+        // Unwrap and scale result from 18 decimals back to token decimals
+        return uint256(SD59x18.unwrap(finalCost - initialCost)) / scalingFactor;
+    }
+    
+    function _revenueFromSell(uint256 poolId, uint256 amount, bool isYes) internal view returns (uint256) {
+        Pool storage pool = pools[poolId];
+        // Scale amount from token decimals to 18 decimals for math
+        SD59x18 amountFixed = sd(int256(amount * scalingFactor));
+        SD59x18 initialCost = _calcCost(pool.nYes, pool.nNo, pool.b);
+        SD59x18 finalCost;
+        if (isYes) {
+            finalCost = _calcCost(pool.nYes - amountFixed, pool.nNo, pool.b);
+        } else {
+            finalCost = _calcCost(pool.nYes, pool.nNo - amountFixed, pool.b);
+        }
+        // Unwrap and scale result from 18 decimals back to token decimals
+        return uint256(SD59x18.unwrap(initialCost - finalCost)) / scalingFactor;
+    }
+    
     // --- View Functions ---
 
     function withdrawableAmount(uint256 poolId, address user) public view returns (uint256) {
         Pool storage pool = pools[poolId];
         Resolution resolution = pool.resolution;
-        require(resolution == Resolution.YES || resolution == Resolution.NO || resolution == Resolution.INCONCLUSIVE, "Pool not resolved");
+        require(resolution != Resolution.UNRESOLVED, "Pool not resolved");
 
         uint256 userYes = yesBalances[poolId][user];
         uint256 userNo = noBalances[poolId][user];
@@ -323,7 +376,7 @@ contract BetMarket is Ownable {
             if (pool.totalSupplyYes > 0) payout = (pool.collateral * userYes) / pool.totalSupplyYes;
         } else if (resolution == Resolution.NO) {
             if (pool.totalSupplyNo > 0) payout = (pool.collateral * userNo) / pool.totalSupplyNo;
-        } else {
+        } else { // Inconclusive
             uint256 totalTokens = pool.totalSupplyYes + pool.totalSupplyNo;
             if (totalTokens > 0) {
                 uint256 userTotalTokens = userYes + userNo;
@@ -331,20 +384,6 @@ contract BetMarket is Ownable {
             }
         }
         return payout;
-    }
-
-    function _costToBuy(uint256 poolId, uint256 amount, bool isYes) internal view returns (uint256) {
-        Pool storage pool = pools[poolId];
-        SD59x18 amountFixed = sd(int256(amount)); // Convert 6-decimal to 18-decimal fixed point
-        SD59x18 initialCost = _calcCost(pool.nYes, pool.nNo, pool.b);
-        SD59x18 finalCost;
-        if (isYes) {
-            finalCost = _calcCost(pool.nYes + amountFixed, pool.nNo, pool.b);
-        } else {
-            finalCost = _calcCost(pool.nYes, pool.nNo + amountFixed, pool.b);
-        }
-        uint256 netCost = uint256(SD59x18.unwrap(finalCost - initialCost));
-        return netCost; // No conversion needed since we're using 6-decimal throughout
     }
 
     function _costToBuyYes(uint256 poolId, uint256 amount) internal view returns (uint256) {
@@ -368,30 +407,16 @@ contract BetMarket is Ownable {
     }
 
     function revenueFromSellYes(uint256 poolId, uint256 amount) public view returns (uint256) {
-        Pool storage pool = pools[poolId];
-        SD59x18 amountFixed = sd(int256(amount)); // Convert 6-decimal to 18-decimal fixed point
-        SD59x18 initialCost = _calcCost(pool.nYes, pool.nNo, pool.b);
-        SD59x18 finalCost = _calcCost(pool.nYes - amountFixed, pool.nNo, pool.b);
-        uint256 grossRevenue = uint256(SD59x18.unwrap(initialCost - finalCost));
+        uint256 grossRevenue = _revenueFromSell(poolId, amount, true);
         uint256 fee = (grossRevenue * TOTAL_FEE_BPS) / 10000;
         if (grossRevenue <= fee) return 0;
-        return (grossRevenue - fee); // No conversion needed since we're using 6-decimal throughout
+        return (grossRevenue - fee);
     }
 
     function revenueFromSellNo(uint256 poolId, uint256 amount) public view returns (uint256) {
-        Pool storage pool = pools[poolId];
-        SD59x18 amountFixed = sd(int256(amount)); // Convert 6-decimal to 18-decimal fixed point
-        SD59x18 initialCost = _calcCost(pool.nYes, pool.nNo, pool.b);
-        SD59x18 finalCost = _calcCost(pool.nYes, pool.nNo - amountFixed, pool.b);
-        uint256 grossRevenue = uint256(SD59x18.unwrap(initialCost - finalCost));
+        uint256 grossRevenue = _revenueFromSell(poolId, amount, false);
         uint256 fee = (grossRevenue * TOTAL_FEE_BPS) / 10000;
         if (grossRevenue <= fee) return 0;
-        return (grossRevenue - fee); // No conversion needed since we're using 6-decimal throughout
-    }
-
-    function _calcCost(SD59x18 _nYes, SD59x18 _nNo, SD59x18 _b) internal pure returns (SD59x18) {
-        SD59x18 expNy = exp(_nYes / _b);
-        SD59x18 expNn = exp(_nNo / _b);
-        return ln(expNy + expNn) * _b;
+        return (grossRevenue - fee);
     }
 }
